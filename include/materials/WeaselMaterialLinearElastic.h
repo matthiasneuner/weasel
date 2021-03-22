@@ -24,16 +24,28 @@
 
 #pragma once
 
-#include "MooseApp.h"
-
-class WeaselApp : public MooseApp
+#include "DerivativeMaterialInterface.h"
+class WeaselMaterialLinearElastic : public DerivativeMaterialInterface<Material>
 {
 public:
   static InputParameters validParams();
 
-  WeaselApp(InputParameters parameters);
-  virtual ~WeaselApp();
+  WeaselMaterialLinearElastic(const InputParameters & parameters);
 
-  static void registerApps();
-  static void registerAll(Factory & f, ActionFactory & af, Syntax & s);
+protected:
+  virtual void initQpStatefulProperties() override;
+  virtual void computeQpProperties() override;
+
+  /// base name for multiple materials on a block
+  const std::string _base_name;
+
+  /// Young's modulus
+  const Real _E;
+  /// Poisson ratio
+  const Real _nu;
+
+  const MaterialProperty<RankTwoTensor> & _dstrain;
+  MaterialProperty<RankTwoTensor> & _stress;
+  const MaterialProperty<RankTwoTensor> & _stress_old;
+  MaterialProperty<RankFourTensor> & _dstress_dstrain;
 };

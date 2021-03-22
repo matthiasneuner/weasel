@@ -1,6 +1,5 @@
 Weasel
 =====
 
-"Fork Weasel" to create a new MOOSE-based application.
-
-For more information see: [http://mooseframework.org/create-an-app/](http://mooseframework.org/create-an-app/)
+A simple MOOSE app for solid mechanics teaching purposes.
+No dependencies except Eigen.
