@@ -22,14 +22,14 @@
  * ---------------------------------------------------------------------
  */
 
-#include "WeaselMaterialVonMises.h"
+#include "WeaselMaterialDamagedVonMises.h"
 #include "WeaselContinuumMechanics.h"
 #include <Eigen/Dense>
 
-registerMooseObject("WeaselApp", WeaselMaterialVonMises);
+registerMooseObject("WeaselApp", WeaselMaterialDamagedVonMises);
 
 InputParameters
-WeaselMaterialVonMises::validParams()
+WeaselMaterialDamagedVonMises::validParams()
 {
   InputParameters params = Material::validParams();
   params.addClassDescription(
@@ -41,16 +41,20 @@ WeaselMaterialVonMises::validParams()
   params.addRequiredParam<Real>("E", "Young's modulus");
   params.addRequiredParam<Real>("nu", "Poisson ratio");
   params.addRequiredParam<Real>("fcy", "Yield stress");
+  params.addRequiredParam<Real>("epsilon_f", "Softening modulus");
   return params;
 }
 
-WeaselMaterialVonMises::WeaselMaterialVonMises(const InputParameters & parameters)
+WeaselMaterialDamagedVonMises::WeaselMaterialDamagedVonMises(const InputParameters & parameters)
   : DerivativeMaterialInterface<Material>(parameters),
     _E(getParam<Real>("E")),
     _nu(getParam<Real>("nu")),
     _fcy(getParam<Real>("fcy")),
+    _epsilon_f(getParam<Real>("epsilon_f")),
     _Cel(Weasel::Elasticity::stiffnessTensor(_E, _nu)),
     _base_name(isParamValid("base_name") ? getParam<std::string>("base_name") + "_" : ""),
+    _equivalent_plastic_strain_old(getMaterialPropertyOld<Real>("equivalent_plastic_strain")),
+    _equivalent_plastic_strain(declareProperty<Real>("equivalent_plastic_strain")),
     _dstrain(getMaterialProperty<RankTwoTensor>("strain_increment")),
     _stress(declareProperty<RankTwoTensor>(_base_name + "stress")),
     _stress_old(getMaterialPropertyOld<RankTwoTensor>(_base_name + "stress")),
@@ -59,49 +63,75 @@ WeaselMaterialVonMises::WeaselMaterialVonMises(const InputParameters & parameter
 }
 
 void
-WeaselMaterialVonMises::initQpStatefulProperties()
+WeaselMaterialDamagedVonMises::initQpStatefulProperties()
 {
   // Initalize stress to zero
   _stress[_qp] = Weasel::rankTwoTensorFromVoigt(Vector6r::Zero(), false);
+  // Initialize inelastic strain to zero
+  _equivalent_plastic_strain[_qp] = 0.0;
 }
 
 void
-WeaselMaterialVonMises::computeQpProperties()
+WeaselMaterialDamagedVonMises::computeQpProperties()
 {
   // Get voigt vectors from MOOSE tensors
   const auto strainIncrement = Weasel::voigtFromRankTwoTensor(_dstrain[_qp], true);
   const auto stressOld = Weasel::voigtFromRankTwoTensor(_stress_old[_qp], false);
+  Real kappaOld = _equivalent_plastic_strain_old[_qp];
+
+  const auto [omegaOld, dOmegaOld_dKappa] = computeDamage(kappaOld);
 
   Vector6r stress;
   Matrix6r dStress_dStrain;
+  Real kappa;
+  Real omega;
 
   // Compute trial stress
   // σᵗʳₙ₊₁ = σₙ + Cᵉˡ : Δ ε
   const auto trialStress = stressOld + _Cel * strainIncrement;
 
-  if (checkIfYielding(trialStress))
+  // Compute effective trial stress
+  const auto effectiveTrialStress = trialStress * 1. / (1 - omegaOld);
+  const auto trialKappa = kappaOld;
+
+  if (checkIfYielding(effectiveTrialStress))
   {
     // yielding, perform return mapping
-    const auto [stressNew, dStressNew_dStrain] = performReturnMapping(trialStress);
+    const auto [effectiveStressNew, dEffectiveStressNew_dStrain, kappaNew, dKappa_dStrain] =
+        performReturnMapping(effectiveTrialStress, trialKappa);
 
-    // new stress is the back projected stess, tangent stiffness is the elastoplastic stiffness
-    stress = stressNew;
-    dStress_dStrain = dStressNew_dStrain;
+    // update of damage
+    auto [omega, dOmega_dKappa] = computeDamage(kappaNew);
+
+    // new stress is the back projected stess, tangent stiffness is the damaged elastoplastic
+    // stiffness
+    stress = effectiveStressNew * (1 - omega);
+    dStress_dStrain = dEffectiveStressNew_dStrain * (1 - omega) + effectiveStressNew * (1 - omega) *
+                                                                      -1 * dOmega_dKappa *
+                                                                      dKappa_dStrain.transpose();
+
+    kappa = kappaNew;
   }
   else
   {
     // no yielding, resulting stress is trial stress, tangent stiffness is elastic stiffness
-    stress = trialStress;
-    dStress_dStrain = _Cel;
+    stress = trialStress * (1 - omega);
+    dStress_dStrain = _Cel * (1 - omega);
+
+    // kappa did not change
+    kappa = trialKappa;
   }
 
   // Convert voigt notation back to MOOSE tensors
   _stress[_qp] = Weasel::rankTwoTensorFromVoigt(stress, false);
   _dstress_dstrain[_qp] = Weasel::rankFourTensorFromVoigt(dStress_dStrain);
+
+  // store inelastic equivalent strain
+  _equivalent_plastic_strain[_qp] = kappa;
 }
 
 Real
-WeaselMaterialVonMises::yieldFunction(const Vector6r & stress)
+WeaselMaterialDamagedVonMises::yieldFunction(const Vector6r & stress)
 {
   const Real J2 = Weasel::Invariants::J2(stress);
 
@@ -110,7 +140,7 @@ WeaselMaterialVonMises::yieldFunction(const Vector6r & stress)
 }
 
 Vector6r
-WeaselMaterialVonMises::dYieldFunction_dStress(const Vector6r & stress)
+WeaselMaterialDamagedVonMises::dYieldFunction_dStress(const Vector6r & stress)
 {
 
   const Real J2 = Weasel::Invariants::J2(stress);
@@ -120,18 +150,32 @@ WeaselMaterialVonMises::dYieldFunction_dStress(const Vector6r & stress)
   return -0.5 / (std::sqrt(3 * J2)) * 3 * dJ2_dStress;
 }
 
+Real
+WeaselMaterialDamagedVonMises::deltaKappa(const Vector6r & dStrainPlastic)
+{
+  // Correct shear terms for J2 ( of strain ) computation
+  Vector6r dStrainPlasticCorrected;
+  dStrainPlasticCorrected << dStrainPlastic(0), dStrainPlastic(1), dStrainPlastic(2),
+      dStrainPlastic(3) / 2, dStrainPlastic(4) / 2, dStrainPlastic(5) / 2;
+
+  const Real J2 = Weasel::Invariants::J2(dStrainPlasticCorrected);
+
+  return std::sqrt(3 * J2);
+}
+
 bool
-WeaselMaterialVonMises::checkIfYielding(const Vector6r & stress)
+WeaselMaterialDamagedVonMises::checkIfYielding(const Vector6r & stress)
 {
   const auto f = yieldFunction(stress);
   return f > 1e-12;
 }
 
 VectorXr
-WeaselMaterialVonMises::F(const VectorXr & X)
+WeaselMaterialDamagedVonMises::F(const VectorXr & X)
 {
   const Vector6r & stress = X.head(6);
-  const Real & dLambda = X(6);
+  const Real & kappa = X(6);
+  const Real & dLambda = X(7);
 
   VectorXr F(X);
 
@@ -142,19 +186,22 @@ WeaselMaterialVonMises::F(const VectorXr & X)
    * | ...              |
    * | ...              |
    * | ...              |
+   * | κₙ₊₁ - Δκ        |
    * \ f(σₙ₊₁)          /
    */
+  const Vector6r dStrainPlastic = dLambda * dYieldFunction_dStress(stress);
 
   // clang-format off
-  F.head(6) = stress + _Cel * dLambda * dYieldFunction_dStress(stress);
-  F(6)      = yieldFunction(stress);
+  F.head(6) = stress + _Cel * dStrainPlastic;
+  F(6)      = kappa - deltaKappa ( dStrainPlastic ) ; 
+  F(7)      = yieldFunction(stress);
   // clang-format on  
 
   return F;
 }
 
 MatrixXr
-WeaselMaterialVonMises::dFdX(const VectorXr & X)
+WeaselMaterialDamagedVonMises::dFdX(const VectorXr & X)
 {
   const auto xSize = X.rows();
   MatrixXr J(xSize, xSize);
@@ -183,8 +230,8 @@ WeaselMaterialVonMises::dFdX(const VectorXr & X)
   return J;
 }
 
-WeaselMaterialVonMises::ReturnMappingResult
-WeaselMaterialVonMises::performReturnMapping(const Vector6r & trialStress)
+WeaselMaterialDamagedVonMises::ReturnMappingResult
+WeaselMaterialDamagedVonMises::performReturnMapping(const Vector6r & trialStress, Real trialKappa)
 {
   /* Solve the equation system in the unknowns σₙ₊₁ and Δλ
    *
@@ -195,6 +242,7 @@ WeaselMaterialVonMises::performReturnMapping(const Vector6r & trialStress)
    * | | = | ...    |   | ...              |
    * | | = | ...    |   | ...              |
    * | | = | ...    |   | ...              |
+   * | | = | κₙ     |   | κₙ₊₁ - Δκ        |
    * \ / = \ 0      /   \ f(σₙ₊₁)          /
    *
    *                 ∂f(σₙ₊₁)
@@ -202,20 +250,21 @@ WeaselMaterialVonMises::performReturnMapping(const Vector6r & trialStress)
    *                 ∂σₙ₊₁
    */
 
-  constexpr auto sizeEq = 6 + 1;
+  constexpr auto sizeEq = 6 + 1 + 1;
 
   VectorXr residual(sizeEq);
 
   VectorXr LHS(sizeEq);
-  // left hand side vector X Layout : LHS  = [ σ₁₁, σ₂₂, σ₃₃, σ₁₂, σ₁₃, σ₂₃, 0 ]ᵀ
+  // left hand side vector X Layout : LHS  = [ σ₁₁, σ₂₂, σ₃₃, σ₁₂, σ₁₃, σ₂₃, κₙ, 0 ]ᵀ
   LHS.head(6) = trialStress;
-  LHS(6) = 0.0;
+  LHS(6) = trialKappa;
+  LHS(7) = 0.0;
 
   // X contains the 7 unknowns
   VectorXr X(sizeEq);
   VectorXr dX = VectorXr::Zero(sizeEq);
 
-  // solution vector X Layout : X = [ σ₁₁, σ₂₂, σ₃₃, σ₁₂, σ₁₃, σ₂₃, Δλ ]
+  // solution vector X Layout : X = [ σ₁₁, σ₂₂, σ₃₃, σ₁₂, σ₁₃, σ₂₃, κₙ₊₁, Δλ ]
   // intial guess for the unknowns: assume the trial state!
   X = LHS;
   residual = LHS - F(X);
@@ -241,6 +290,9 @@ WeaselMaterialVonMises::performReturnMapping(const Vector6r & trialStress)
   // new converged stress are the first 6 entries of solution vector X
   const Vector6r newStress = X.head(6);
 
+  // new converged kappa is the 7th entry
+  const Real newKappa = X(6);
+
   /* Compute elasto plastic stiffness according to following scheme
    *
    * ∂ σₙ₊₁   ∂σₙ₊₁      ∂σᵗʳₙ₊₁
@@ -264,11 +316,26 @@ WeaselMaterialVonMises::performReturnMapping(const Vector6r & trialStress)
   Eigen::Matrix<Real, sizeEq, 6> dLHS_dStrain;
 
   dLHS_dStrain.block<6, 6>(0, 0) = _Cel;
-  dLHS_dStrain.block<1, 6>(6, 0) = Vector6r::Zero();
+  dLHS_dStrain.row(6) = Vector6r::Zero();
+  dLHS_dStrain.row(7) = Vector6r::Zero();
 
   MatrixXr dX_dStrain = dFdX(X).colPivHouseholderQr().solve(dLHS_dStrain);
 
   const Matrix6r dNewStress_dStrain = dX_dStrain.block<6, 6>(0, 0);
+  const Vector6r dNewKappa_dStrain = dX_dStrain.row(6);
 
-  return {newStress, dNewStress_dStrain};
+  return {.stress = newStress,
+          .dStress_dStrain = dNewStress_dStrain,
+
+          .kappa = newKappa,
+          .dKappa_dStrain = dNewKappa_dStrain};
+}
+
+std::pair<Real, Real>
+WeaselMaterialDamagedVonMises::computeDamage(Real kappa)
+{
+  const Real omega = 1 - std::exp(-kappa / _epsilon_f);
+  const Real dOmega_dKappa = 0 - std::exp(-kappa / _epsilon_f) * -1. / _epsilon_f;
+
+  return {omega, dOmega_dKappa};
 }
