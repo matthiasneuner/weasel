@@ -26,7 +26,13 @@
 
 #include "DerivativeMaterialInterface.h"
 #include "WeaselContinuumMechanics.h"
-
+/**
+ * Implementation of the (local) damage mode for concrete after
+ * Peerlings, R. H. J., R. de Borst, W. a. M. Brekelmans, and M. G. D. Geers.
+ * “Gradient-Enhanced Damage Modelling of Concrete Fracture.”
+ * Mechanics of Cohesive-Frictional Materials 3, no. 4 (1998): 323–42.
+ * https://doi.org/10.1002/(SICI)1099-1484(1998100)3:4<323::AID-CFM51>3.0.CO;2-Z.
+ */
 class WeaselMaterialPeerlingsConcreteDamage : public DerivativeMaterialInterface<Material>
 {
 public:
