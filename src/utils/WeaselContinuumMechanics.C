@@ -51,14 +51,7 @@ rankFourTensorFromVoigt(const Matrix6r & r4tInVoigt)
     for (unsigned j = 0; j < 3; ++j)
       for (unsigned k = 0; k < 3; ++k)
         for (unsigned l = 0; l < 3; ++l)
-        {
           r4t(i, j, k, l) = r4tInVoigt(comp2vgt[i][j], comp2vgt[k][l]);
-
-          /* if ( i != j && _divide_shear_terms_by_2_ij ) */
-          /*   _the_rank_four_tensor[_qp]( i, j, k, l ) *= 0.5; */
-          /* if ( k != l && _divide_shear_terms_by_2_kl ) */
-          /*   _the_rank_four_tensor[_qp]( i, j, k, l ) *= 2; */
-        }
 
   return r4t;
 }
@@ -110,12 +103,12 @@ const Vector6r IHyd = (Vector6r() << 1. / 3, 1. / 3, 1. / 3, 0, 0, 0).finished()
 
 const Matrix6r IDev = (Matrix6r() <<
                            // clang-format off
-        2./3,    -1./3,   -1./3,    0,  0,  0,
-        -1./3,   2./3,    -1./3,    0,  0,  0,
-        -1./3,   -1./3,   2./3,     0,  0,  0,
-        0,          0,      0,      1,  0,  0,
-        0,          0,      0,      0,  1,  0,
-        0,          0,      0,      0,  0,  1).finished();
+  2./3,    -1./3,   -1./3,    0,  0,  0,
+  -1./3,   2./3,    -1./3,    0,  0,  0,
+  -1./3,   -1./3,   2./3,     0,  0,  0,
+  0,          0,      0,      1,  0,  0,
+  0,          0,      0,      0,  1,  0,
+  0,          0,      0,      0,  0,  1).finished();
 // clang-format on
 
 Real
@@ -164,6 +157,27 @@ dJ2_dStress(const Vector6r & stress)
   return P.array() * (IDev * stress).array();
 }
 
+Real
+I2Strain(const Vector6r & strain)
+{
+  const Vector6r & e = strain;
+
+  return e(0) * e(1) + e(1) * e(2) + e(2) * e(0) - e(3) / 2. * e(3) / 2. - e(4) / 2. * e(4) / 2. -
+         e(5) / 2. * e(5) / 2.;
+}
+
+Real
+J2Strain(const Vector6r & strain)
+{
+  const Real res = 1. / 3. * std::pow(I1(strain), 2.) - I2Strain(strain);
+  return res > 0 ? res : 0;
+}
+
+Vector6r
+dJ2Strain_dStrain(const Vector6r & strain)
+{
+  return PInv.array() * (IDev * strain).array();
+}
 }
 
 }

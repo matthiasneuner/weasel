@@ -64,6 +64,10 @@ Real J3(const Vector6r & stress);
 
 Vector6r dJ2_dStress(const Vector6r & stress);
 
+Real I2Strain(const Vector6r & strain);
+Real J2Strain(const Vector6r & strain);
+
+Vector6r dJ2Strain_dStrain(const Vector6r & strain);
 }
 
 }
